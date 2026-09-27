@@ -1,269 +1,87 @@
 #!/bin/bash
-# setup-apache.sh — Apache + MariaDB in Podman-Containern mit gemeinsamem Netzwerk
+# setup-apache.sh — Baut und startet einen Apache-Webserver in einem Podman-Container
 
 set -euo pipefail
 
-# ── Konfiguration ────────────────────────────────────────────────────────────
-NETWORK_NAME="webnet"
-DB_IMAGE="docker.io/library/mariadb:11"
-DB_CONTAINER="mariadb"
-DB_ROOT_PASS="rootsecret"
-DB_NAME="namen"
-DB_USER="webuser"
-DB_PASS="changeme"
-
-WEB_IMAGE="my-apache"
-WEB_CONTAINER="apache-server"
+IMAGE_NAME="Fischtank"
+CONTAINER_NAME="fischtank-apache-server"
 HOST_PORT="8080"
 CONTAINER_PORT="8080"
 HTML_DIR="./html"
 CONTAINERFILE="Containerfile"
 
-# ── 1. PHP-Formular erstellen (falls nicht vorhanden) ─────────────────────────
-mkdir -p "$HTML_DIR"
-if [ ! -f "$HTML_DIR/index.php" ]; then
-  echo "[INFO] Erstelle PHP-Formular: $HTML_DIR/index.php"
-  cat > "$HTML_DIR/index.php" <<'PHPEOF'
-<?php
-$dsn    = 'mysql:host=mariadb;port=3306;dbname=namen;charset=utf8mb4';
-$dbUser = 'webuser';
-$dbPass = getenv('DB_PASSWORD') ?: 'changeme';
-
-try {
-    $pdo = new PDO($dsn, $dbUser, $dbPass, [
-        PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-    ]);
-    $pdo->exec("CREATE TABLE IF NOT EXISTS personen (
-        id       INT AUTO_INCREMENT PRIMARY KEY,
-        vorname  VARCHAR(100) NOT NULL,
-        nachname VARCHAR(100) NOT NULL,
-        erstellt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )");
-} catch (PDOException $e) {
-    $dbError = 'Datenbankverbindung fehlgeschlagen.';
-}
-
-$vorname = $nachname = $message = '';
-
-if (!isset($dbError) && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? 'insert';
-    if ($action === 'delete' && isset($_POST['id'])) {
-        $id = (int)$_POST['id'];
-        $stmt = $pdo->prepare("DELETE FROM personen WHERE id = ?");
-        $stmt->execute([$id]);
-        $message = '🗑️ Eintrag #' . $id . ' wurde gelöscht.';
-    } else {
-        $vorname  = trim($_POST['vorname']  ?? '');
-        $nachname = trim($_POST['nachname'] ?? '');
-        if ($vorname !== '' && $nachname !== '') {
-            $stmt = $pdo->prepare("INSERT INTO personen (vorname, nachname) VALUES (?, ?)");
-            $stmt->execute([mb_substr($vorname, 0, 100), mb_substr($nachname, 0, 100)]);
-            $message  = '✅ ' . htmlspecialchars($vorname,  ENT_QUOTES, 'UTF-8')
-                      . ' '  . htmlspecialchars($nachname, ENT_QUOTES, 'UTF-8')
-                      . ' wurde gespeichert.';
-            $vorname = $nachname = '';
-        }
-    }
-}
-
-$personen = [];
-if (!isset($dbError)) {
-    $personen = $pdo->query("SELECT * FROM personen ORDER BY erstellt DESC")->fetchAll();
-}
-?>
+# ── 1. HTML-Verzeichnis anlegen (falls nicht vorhanden) ──────────────────────
+if [ ! -d "$HTML_DIR" ]; then
+  echo "[INFO] Erstelle HTML-Verzeichnis: $HTML_DIR"
+  mkdir -p "$HTML_DIR"
+  cat > "$HTML_DIR/index.html" <<'EOF'
 <!DOCTYPE html>
 <html lang="de">
 <head>
   <meta charset="UTF-8">
-  <title>Namenseingabe</title>
-  <style>
-    body  { font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 0 1rem; }
-    h1,h2 { font-size: 1.3rem; margin-bottom: 1rem; }
-    label { display: block; margin-bottom: .25rem; font-weight: bold; }
-    input[type=text] { width: 100%; padding: .5rem; margin-bottom: 1rem;
-      border: 1px solid #ccc; border-radius: 4px; font-size: 1rem; box-sizing: border-box; }
-    button { padding: .5rem 1.5rem; background: #3b82d4; color: #fff;
-      border: none; border-radius: 4px; font-size: 1rem; cursor: pointer; }
-    button:hover { background: #2563b0; }
-    button.del { padding: .25rem .75rem; background: #fff; color: #c0392b;
-      border: 1px solid #fca5a5; font-size: .85rem; }
-    button.del:hover { background: #fff0f0; }
-    .msg  { margin-top: 1rem; padding: .75rem; background: #f0f6ff;
-      border: 1px solid #bfdbfe; border-radius: 4px; }
-    .err  { background: #fff0f0; border-color: #fca5a5; }
-    table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; font-size: .95rem; }
-    th,td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid #e5e7eb; }
-    th    { background: #f7f8fa; font-weight: bold; }
-    tr:hover td { background: #f7f8fa; }
-  </style>
+  <title>Apache auf Podman</title>
 </head>
 <body>
-  <h1>Namenseingabe</h1>
-  <?php if (isset($dbError)): ?>
-    <div class="msg err"><?= htmlspecialchars($dbError, ENT_QUOTES, 'UTF-8') ?></div>
-  <?php else: ?>
-  <form method="POST" action="">
-    <label for="vorname">Vorname</label>
-    <input type="text" id="vorname" name="vorname"
-           value="<?= htmlspecialchars($vorname,  ENT_QUOTES, 'UTF-8') ?>"
-           placeholder="z. B. Max" required maxlength="100">
-    <label for="nachname">Nachname</label>
-    <input type="text" id="nachname" name="nachname"
-           value="<?= htmlspecialchars($nachname, ENT_QUOTES, 'UTF-8') ?>"
-           placeholder="z. B. Mustermann" required maxlength="100">
-    <button type="submit">Speichern</button>
-  </form>
-  <?php if ($message): ?>
-    <div class="msg"><?= $message ?></div>
-  <?php endif; ?>
-  <h2>Gespeicherte Einträge</h2>
-  <?php if (empty($personen)): ?>
-    <p style="color:#57606a">Noch keine Einträge vorhanden.</p>
-  <?php else: ?>
-  <table>
-    <thead><tr><th>#</th><th>Vorname</th><th>Nachname</th><th>Gespeichert</th><th></th></tr></thead>
-    <tbody>
-    <?php foreach ($personen as $p): ?>
-      <tr>
-        <td><?= (int)$p['id'] ?></td>
-        <td><?= htmlspecialchars($p['vorname'],  ENT_QUOTES, 'UTF-8') ?></td>
-        <td><?= htmlspecialchars($p['nachname'], ENT_QUOTES, 'UTF-8') ?></td>
-        <td><?= htmlspecialchars($p['erstellt'], ENT_QUOTES, 'UTF-8') ?></td>
-        <td>
-          <form method="POST" action="" style="margin:0">
-            <input type="hidden" name="action" value="delete">
-            <input type="hidden" name="id" value="<?= (int)$p['id'] ?>">
-            <button type="submit" class="del">Löschen</button>
-          </form>
-        </td>
-      </tr>
-    <?php endforeach; ?>
-    </tbody>
-  </table>
-  <?php endif; ?>
-  <?php endif; ?>
+  <h1>Apache läuft auf Podman!</h1>
+  <p>Dieser Server wurde mit dem setup-apache.sh Script gestartet.</p>
 </body>
 </html>
-PHPEOF
-  echo "[INFO] index.php wurde erstellt."
+EOF
+  echo "[INFO] Beispiel-index.html wurde erstellt."
 fi
 
-# ── 2. Containerfile für Apache+PHP erstellen ────────────────────────────────
+# ── 2. Containerfile erstellen ───────────────────────────────────────────────
 echo "[INFO] Schreibe $CONTAINERFILE ..."
 cat > "$CONTAINERFILE" <<'EOF'
-FROM quay.io/centos/centos:stream9-minimal
+FROM registry.redhat.io/ubi9/ubi-minimal:latest
 
-# Apache + PHP + MySQL-Treiber installieren
-RUN microdnf install -y httpd php php-cli php-common php-fpm php-pdo php-mysqlnd && \
+# Apache installieren
+RUN microdnf install -y httpd && \
     microdnf clean all
-
-# php-fpm auf appuser umstellen und Unix-Socket konfigurieren
-RUN mkdir -p /run/php-fpm && \
-    sed -i 's/^listen = .*/listen = \/run\/php-fpm\/www.sock/' /etc/php-fpm.d/www.conf && \
-    sed -i 's/^listen.owner = .*/listen.owner = appuser/' /etc/php-fpm.d/www.conf && \
-    sed -i 's/^listen.group = .*/listen.group = appuser/' /etc/php-fpm.d/www.conf && \
-    sed -i 's/^user = apache/user = appuser/' /etc/php-fpm.d/www.conf && \
-    sed -i 's/^group = apache/group = appuser/' /etc/php-fpm.d/www.conf
 
 # Nicht-root-Benutzer anlegen
 RUN useradd -m -u 1001 appuser && \
-    chown -R appuser:appuser /var/www/html /run/httpd /var/log/httpd /run/php-fpm /var/log/php-fpm
+    chown -R appuser:appuser /var/www/html /run/httpd /var/log/httpd
 
-# Apache auf Port 8080 umstellen
+# Apache auf nicht-privilegierten Port umstellen
 RUN sed -i 's/^Listen 80/Listen 8080/' /etc/httpd/conf/httpd.conf && \
     sed -i 's/^#ServerName.*/ServerName localhost/' /etc/httpd/conf/httpd.conf
 
 # Web-Inhalte kopieren
 COPY --chown=appuser:appuser ./html/ /var/www/html/
 
-# Startscript kopieren
-COPY --chown=appuser:appuser start.sh /start.sh
-RUN chmod +x /start.sh
-
 USER 1001
 
 EXPOSE 8080
 
-CMD ["/start.sh"]
+CMD ["httpd", "-D", "FOREGROUND"]
 EOF
 
-# ── 3. Startscript für php-fpm + httpd erstellen ─────────────────────────────
-echo "[INFO] Schreibe start.sh ..."
-cat > "start.sh" <<'EOF'
-#!/bin/bash
-php-fpm --nodaemonize &
-for i in $(seq 1 20); do
-  [ -S /run/php-fpm/www.sock ] && break
-  sleep 0.5
-done
-exec httpd -D FOREGROUND
-EOF
-chmod +x start.sh
-
-# ── 4. Podman-Netzwerk erstellen (falls nicht vorhanden) ─────────────────────
-if ! podman network exists "$NETWORK_NAME" 2>/dev/null; then
-  echo "[INFO] Erstelle Podman-Netzwerk: $NETWORK_NAME"
-  podman network create "$NETWORK_NAME"
-else
-  echo "[INFO] Netzwerk '$NETWORK_NAME' bereits vorhanden."
+# ── 3. Alten Container entfernen (falls vorhanden) ───────────────────────────
+if podman container exists "$CONTAINER_NAME" 2>/dev/null; then
+  echo "[INFO] Entferne bestehenden Container: $CONTAINER_NAME"
+  podman rm -f "$CONTAINER_NAME"
 fi
 
-# ── 5. MariaDB-Container starten ─────────────────────────────────────────────
-if podman container exists "$DB_CONTAINER" 2>/dev/null; then
-  echo "[INFO] Entferne bestehenden DB-Container: $DB_CONTAINER"
-  podman rm -f "$DB_CONTAINER"
-fi
+# ── 4. Image bauen ───────────────────────────────────────────────────────────
+echo "[INFO] Baue Image: $IMAGE_NAME ..."
+podman build -t "$IMAGE_NAME" .
 
-echo "[INFO] Starte MariaDB-Container: $DB_CONTAINER ..."
+# ── 5. Container starten ─────────────────────────────────────────────────────
+echo "[INFO] Starte Container: $CONTAINER_NAME ..."
 podman run -d \
-  --name "$DB_CONTAINER" \
-  --network "$NETWORK_NAME" \
-  -e MYSQL_ROOT_PASSWORD="$DB_ROOT_PASS" \
-  -e MYSQL_DATABASE="$DB_NAME" \
-  -e MYSQL_USER="$DB_USER" \
-  -e MYSQL_PASSWORD="$DB_PASS" \
-  "$DB_IMAGE"
-
-# ── 6. Auf MariaDB warten ─────────────────────────────────────────────────────
-echo "[INFO] Warte auf MariaDB ..."
-for i in $(seq 1 30); do
-  if podman exec "$DB_CONTAINER" mariadb-admin ping -u root -p"$DB_ROOT_PASS" --silent 2>/dev/null; then
-    echo "[INFO] MariaDB ist bereit."
-    break
-  fi
-  sleep 2
-done
-
-# ── 7. Apache-Image bauen ────────────────────────────────────────────────────
-if podman container exists "$WEB_CONTAINER" 2>/dev/null; then
-  echo "[INFO] Entferne bestehenden Web-Container: $WEB_CONTAINER"
-  podman rm -f "$WEB_CONTAINER"
-fi
-
-echo "[INFO] Baue Web-Image: $WEB_IMAGE ..."
-podman build -t "$WEB_IMAGE" .
-
-# ── 8. Apache-Container starten ──────────────────────────────────────────────
-echo "[INFO] Starte Web-Container: $WEB_CONTAINER ..."
-podman run -d \
-  --name "$WEB_CONTAINER" \
-  --network "$NETWORK_NAME" \
+  --name "$CONTAINER_NAME" \
   --publish "127.0.0.1:${HOST_PORT}:${CONTAINER_PORT}" \
-  -e DB_PASSWORD="$DB_PASS" \
-  "$WEB_IMAGE"
+  "$IMAGE_NAME"
 
-# ── 9. Status ausgeben ───────────────────────────────────────────────────────
+# ── 6. Status ausgeben ───────────────────────────────────────────────────────
 echo ""
-echo "✅ Stack läuft!"
-echo ""
-echo "  🌐 Apache:  http://127.0.0.1:${HOST_PORT}"
-echo "  🗄️  MariaDB: Container '$DB_CONTAINER' im Netzwerk '$NETWORK_NAME'"
-echo "              Datenbank: $DB_NAME | Benutzer: $DB_USER"
+echo "✅ Apache-Webserver läuft!"
+echo "   URL:       http://127.0.0.1:${HOST_PORT}"
+echo "   Container: $CONTAINER_NAME"
+echo "   Image:     $IMAGE_NAME"
 echo ""
 echo "Nützliche Befehle:"
-echo "  Web-Logs:   podman logs -f $WEB_CONTAINER"
-echo "  DB-Logs:    podman logs -f $DB_CONTAINER"
-echo "  DB-Shell:   podman exec -it $DB_CONTAINER mariadb -u $DB_USER -p$DB_PASS $DB_NAME"
-echo "  Stoppen:    podman stop $WEB_CONTAINER $DB_CONTAINER"
-echo "  Entfernen:  podman rm -f $WEB_CONTAINER $DB_CONTAINER && podman network rm $NETWORK_NAME"
+echo "  Logs anzeigen:   podman logs -f $CONTAINER_NAME"
+echo "  Stoppen:         podman stop $CONTAINER_NAME"
+echo "  Entfernen:       podman rm -f $CONTAINER_NAME"

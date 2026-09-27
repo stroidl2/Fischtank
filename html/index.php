@@ -1,4 +1,18 @@
 <?php
+// ── Session-Schutz ───────────────────────────────────────────────────────────
+session_start();
+if (empty($_SESSION['user'])) {
+    header('Location: login.php');
+    exit;
+}
+
+// ── Logout ───────────────────────────────────────────────────────────────────
+if (isset($_GET['logout'])) {
+    session_destroy();
+    header('Location: login.php');
+    exit;
+}
+
 // ── DB-Verbindung ────────────────────────────────────────────────────────────
 $dsn    = 'mysql:host=mariadb;port=3306;dbname=namen;charset=utf8mb4';
 $dbUser = 'webuser';
@@ -92,7 +106,14 @@ if (!isset($dbError)) {
   </style>
 </head>
 <body>
-  <h1>Namenseingabe</h1>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;padding-bottom:.75rem;border-bottom:1px solid #e5e7eb;">
+    <strong>Namenseingabe</strong>
+    <span style="font-size:.9rem;color:#57606a">
+      👤 <?= htmlspecialchars($_SESSION['user'], ENT_QUOTES, 'UTF-8') ?> &nbsp;|&nbsp;
+      <a href="admin.php" style="color:#3b82d4;text-decoration:none;">Benutzerverwaltung</a> &nbsp;|&nbsp;
+      <a href="?logout=1" style="color:#c0392b;text-decoration:none;">Abmelden</a>
+    </span>
+  </div>
 
   <?php if (isset($dbError)): ?>
     <div class="msg err"><?= htmlspecialchars($dbError, ENT_QUOTES, 'UTF-8') ?></div>
